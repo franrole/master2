@@ -51,3 +51,19 @@ n_m3 = p_m3.collect()[0]
 e = n_m3.getrow(1).todense()[0,3]  # terme [100,3]
 print "n_m3 %i" % e
 
+def multiplier(m, v):
+    """multiplier une matrice m et un vecteur v
+    
+    m : rdd de vecteurs lignes
+    v : vecteur
+    """
+    m.context.broadcast(v)
+    return m.map(lambda l: l*v)
+
+l1 = np.array([0, 3, 1, 0])
+l2 = np.array([0, 3, 1, 2])
+m = [l1, l2, l2]
+v = np.array([1, 1, 1, 0])
+
+rdd = sc.parallelize(m)
+multiplier(rdd, v).collect()
