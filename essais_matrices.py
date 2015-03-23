@@ -57,8 +57,8 @@ def multiplier(m, v):
     m : rdd de vecteurs lignes
     v : vecteur
     """
-    m.context.broadcast(v)
-    return m.map(lambda l: l*v)
+    v_b = m.context.broadcast(v)
+    return m.map(lambda l: l*v_b.value)
 
 l1 = np.array([0, 3, 1, 0])
 l2 = np.array([0, 3, 1, 2])
