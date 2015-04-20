@@ -11,7 +11,7 @@ object MyMainObject extends App {
     val spConfig = (new SparkConf).setMaster("local").setAppName("SparkLA")
     val sc = new SparkContext(spConfig)
 
-    val rows = sc.textFile("../data/matrice.txt").map { line =>
+    val rows = sc.textFile("/data/matrice.txt").map { line =>
         val values = line.split(' ').map(_.toDouble)
         Vectors.sparse(values.length, values.zipWithIndex.map(e => (e._2, e._1)).filter(_._2 != 0.0))
     }
@@ -19,7 +19,7 @@ object MyMainObject extends App {
     val rmat = new RowMatrix(rows)
     
     // Build a local DenseMatrix
-    val dm = sc.textFile("../data/matrice_locale.txt").map { line =>
+    val dm = sc.textFile("/data/matrice_locale.txt").map { line =>
         val values = line.split(' ').map(_.toDouble)
         Vectors.dense(values)
     }
