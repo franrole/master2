@@ -27,9 +27,9 @@ class ModularityWithGraphX(
   def run(g: Graph[Int, Double], nRows: Int, numCols: Int): coClusteringModel = {
     var graph = g
     val sc = graph.vertices.sparkContext
-    
+
     //graph : arcs des mots vers les documents
-    
+
     var wordsLabels = ModularityWithGraphX.createRandomLabels(graph, k, 'words)
 
     graph = ModularityWithGraphX.updateLabels(graph, wordsLabels)
@@ -82,13 +82,15 @@ object ModularityWithGraphX {
     val A_coo = ModularityWithBlockMatrix.cooMatrix(sc, cooMatrixFilePath,
       nRows, nCols)
 
-    val graph = createGraphFromCooMatrix(A_coo)
+    val B_coo = ModularityWithBlockMatrix.createBFromA(A_coo, blockSize).toCoordinateMatrix()
+
+    val graph = createGraphFromCooMatrix(B_coo)
 
     new ModularityWithGraphX(k).run(graph, nRows, nCols)
   }
 
   /**
-   * Créer un `Graph` à partir d'une `CoordinateMatrix` [[org.apache.spark.rdd.RDD]].
+   * Créer un `Graph` à partir d'une `CoordinateMatrix`.
    *
    * @param m la matrice
    * @return  le graphe correspondant à la matrice, chaque arc partant d'une
