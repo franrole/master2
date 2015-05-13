@@ -27,29 +27,16 @@ class ModularityWithBlockMatrix(
   }
 
   def run(cooMatrix: CoordinateMatrix): coClusteringModel = {
-    val sc = cooMatrix.entries.sparkContext
+    val B = ModularityWithBlockMatrix.createBFromA(cooMatrix, blockSize)
+    B.blocks.cache()
+
+    val numCols = B.numCols().toInt
+    val numRows = B.numRows().toInt
     
-    val A = cooMatrix.toBlockMatrix(blockSize, blockSize)
-
-    val col_sums = ModularityWithBlockMatrix.colSums(cooMatrix)
-
-    val N = col_sums.sum
-
-    val minus_row_sums_over_N = ModularityWithBlockMatrix
-      .rowSums(cooMatrix, -1 / N)
-
-    val col_sums_v = ModularityWithBlockMatrix
-      .createBlockMatrixFromArray(sc, col_sums, "h", blockSize)
-
-    val minus_row_sums_over_N_v = ModularityWithBlockMatrix
-      .createBlockMatrixFromArray(sc, minus_row_sums_over_N, "v", blockSize)
-
-    val indep = minus_row_sums_over_N_v.multiply(col_sums_v)
-
-    val B = indep.add(A)
+    val sc = B.blocks.sparkContext
 
     var W = ModularityWithBlockMatrix
-      .createRandomW(sc, A.numCols().toInt, k, blockSize)
+      .createRandomW(sc, numCols, k, blockSize)
 
     var m_begin = Double.MinValue
     var change = true
@@ -63,25 +50,25 @@ class ModularityWithBlockMatrix(
       var BW = B.multiply(W)
 
       Z = ModularityWithBlockMatrix
-        .create_Z_or_W(BW, A.numRows().toInt, k, blockSize)
+        .create_Z_or_W(BW, numRows, k, blockSize)
 
       var BtZ = B.transpose.multiply(Z)
 
       W = ModularityWithBlockMatrix
-        .create_Z_or_W(BtZ, A.numCols().toInt, k, blockSize)
+        .create_Z_or_W(BtZ, numCols, k, blockSize)
 
       var k_times_k = Z.transpose.multiply(BW)
 
-      var m_end = ModularityWithBlockMatrix.trace(k_times_k).first()
+      var m_end = ModularityWithBlockMatrix.trace(k_times_k)
 
       val diff = (m_end - m_begin)
       val diff_abs = if (diff < 0) -diff else diff
-      if (diff_abs > 1e-9) {
+      if (diff_abs > epsilon) {
         m_begin = m_end
         change = true
       }
       println(iter)
-      println(s"Criterion: $m_end")
+      println("Criterion: " + m_end)
       iter = iter + 1
     }
 
@@ -95,25 +82,6 @@ class ModularityWithBlockMatrix(
 }
 
 object ModularityWithBlockMatrix {
-//  val path = "/home/stan/new/Stage/data/csv/"
-  val path = "/data"
-
-  /**
-   * Obtenir les paramètres pour un corpus.
-   *
-   * @param corpus nom du corpus (cstr, classic3 ou ng20)
-   * @return (cooMatrixFilePath, nRows, nCols, K, rowsPredictedValuesPath)
-   */
-  def getParamsForCorpus(corpus: String): (String, Int, Int, Int, String) = {
-    corpus match {
-      case "cstr" => (s"${path}/cstr.csv",
-        475, 1000, 4, s"${path}/predicted_labels/cstr")
-      case "classic3" => (s"${path}/classic3.csv",
-        3891, 4303, 3, s"${path}/predicted_labels/classic3")
-      case "ng20" => (s"${path}/ng20.csv",
-        19949, 43586, 20, s"${path}/predicted_labels_ng20")
-    }
-  }
 
   def train(
     sc: SparkContext,
@@ -127,14 +95,24 @@ object ModularityWithBlockMatrix {
 
     val A_coo = cooMatrix(sc, cooMatrixFilePath, nRows, nCols)
 
-    new ModularityWithBlockMatrix(k).run(A_coo)
+    new ModularityWithBlockMatrix(k, maxIterations, blockSize, epsilon).run(A_coo)
   }
 
   /**
-   * Créer une CoordinateMatrix à partir d'un fichier
+   * Créer une CoordinateMatrix à partir d'un fichier.
+   *
+   * @param sc       sparkcontext
+   * @param filePath chemin vers le fichier contenant les valeurs de la matrice
+   *                 où chaque ligne est de la forme i,j,e avec :
+   *                 -  i index de la ligne
+   *                 -  j index de la colonne
+   *                 -  e élément de la ligne i et la colonne j
+   * @param nRows    nombre de lignes de la matrice
+   * @param nCols    nombre de la colonne de la matrice
+   * @return         la matrice représentée par une CoordinateMatrix
    */
   def cooMatrix(sc: SparkContext, filePath: String, nRows: Int,
-                        nCols: Int): CoordinateMatrix = {
+                nCols: Int): CoordinateMatrix = {
     val matrixEntries = sc.textFile(filePath).map { line =>
       val l = line.split(',')
       new MatrixEntry(l(0).toLong, l(1).toLong, l(2).toDouble)
@@ -143,6 +121,12 @@ object ModularityWithBlockMatrix {
     new CoordinateMatrix(matrixEntries, nRows, nCols)
   }
 
+  /**
+   * Sommes des éléments de chaque colonne d'une matrice.
+   *
+   * @param cooMatrix la matrice sous forme de CoordinateMatrix
+   * @return          un tableau des sommes des éléments de chaque colonne
+   */
   def colSums(cooMatrix: CoordinateMatrix): Array[Double] = {
     cooMatrix.entries.aggregate(
       Array.fill[Double](cooMatrix.numCols().toInt)(0))(
@@ -158,8 +142,17 @@ object ModularityWithBlockMatrix {
         })
   }
 
+  /**
+   * Sommes des éléments de chaque ligne d'une matrice.
+   *
+   * @param cooMatrix  la matrice sous forme de CoordinateMatrix
+   * @param multiplyBy coefficient par lequel multiplier tous les éléments
+   *                   (1 par défaut)
+   * @return           un tableau des sommes des éléments de chaque ligne
+   *                   multipliées par un coefficient
+   */
   def rowSums(cooMatrix: CoordinateMatrix,
-                      multiplyBy: Double = 1): Array[Double] = {
+              multiplyBy: Double = 1): Array[Double] = {
     cooMatrix.entries.map(x => new MatrixEntry(x.i, x.j, x.value * multiplyBy))
       .aggregate(Array.fill[Double](cooMatrix.numRows().toInt)(0))(
         (a, e) => {
@@ -175,17 +168,21 @@ object ModularityWithBlockMatrix {
   }
 
   /**
-   * Créer une BlockMatrix à partir d'un Array
+   * Créer une BlockMatrix ligne ou colonne à partir d'un Array.
    *
-   * @param direction:
-   *  - v vertical
-   *  - h horizontal
+   * @param sc        un SparkContext
+   * @param a         le tableau des valeurs
+   * @param direction la direction de la matrice (ligne ou colonne) :
+   *                  - v vertical
+   *                  - h horizontal
+   * @param blockSize la taille des blocs
+   * @return          la matrice par blocs
    */
   def createBlockMatrixFromArray(
-    sc: SparkContext, a: Array[Double], direction: String,
+    sc: SparkContext, a: Array[Double], direction: Symbol,
     blockSize: Int): BlockMatrix = {
     val iterator = a.sliding(blockSize, blockSize)
-    val iterator2 = if (direction == "h") iterator.zipWithIndex
+    val iterator2 = if (direction == 'h) iterator.zipWithIndex
       .map(x => x match {
         case (array, index) => ((0, index),
           Matrices.dense(1, array.length, array))
@@ -196,12 +193,20 @@ object ModularityWithBlockMatrix {
     })
     val arr = iterator2.toArray
     val arr_p = sc.parallelize(arr)
-    val res = new BlockMatrix(arr_p, blockSize, blockSize)
-    res
+    new BlockMatrix(arr_p, blockSize, blockSize)
   }
 
+  /**
+   * Créer une matrice W aléatoirement.
+   *
+   * @param sc        un SparkContext
+   * @param nCols     nombre de colonnes (mots)
+   * @param K         nombre de classes
+   * @param blockSize taille des blocs de la matrice W
+   * @return          la matrice W de taille nCols * K
+   */
   def createRandomW(sc: SparkContext, nCols: Int, K: Int,
-                            blockSize: Int): BlockMatrix = {
+                    blockSize: Int): BlockMatrix = {
     val W_Entries = sc.parallelize((0 until nCols).map { i =>
       new MatrixEntry(i, scala.util.Random.nextInt(K), 1)
     })
@@ -211,6 +216,15 @@ object ModularityWithBlockMatrix {
     W_coo.toBlockMatrix(blockSize, blockSize)
   }
 
+  /**
+   * Trouve le maximum et l'indice de la colonne correspondante de chaque ligne.
+   *
+   * @param m la matrice
+   * @return  RDD de (i, (e, j)) avec :
+   *          - i indice de la ligne
+   *          - j indice de la colonne
+   *          - e le maximum de la ligne i
+   */
   def rows_max_and_argmax(
     m: BlockMatrix): RDD[(Long, (Double, Int))] = {
     m.toIndexedRowMatrix.rows.map(
@@ -219,8 +233,18 @@ object ModularityWithBlockMatrix {
           if (x._1 > y._1) x else y)))
   }
 
+  /**
+   * Créer la matrice d'assignation des colonnes ou des lignes aux classes.
+   *
+   * @param from      la matrice compressée à partir de laquelle déterminer les
+   *                  classes
+   * @param nRows     le nombre de lignes du résultat
+   * @param nCols     le nombre de colonnes du résultat
+   * @param blockSize la taille des blocs de la matrice à créer
+   * @return          la matrice d'assignation aux classes
+   */
   def create_Z_or_W(from: BlockMatrix, nRows: Int,
-                            nCols: Int, blockSize: Int): BlockMatrix = {
+                    nCols: Int, blockSize: Int): BlockMatrix = {
     val entries = rows_max_and_argmax(from).map(x => x match {
       case (l, (e, c)) => new MatrixEntry(l, c, 1.0)
     })
@@ -228,18 +252,54 @@ object ModularityWithBlockMatrix {
     Z_coo.toBlockMatrix(blockSize, blockSize)
   }
 
-  def trace(m: BlockMatrix): RDD[Double] = {
+  /**
+   * Calculer la trace d'une matrice par blocs.
+   *
+   * @param m la matrice
+   * @return  la trace
+   */
+  def trace(m: BlockMatrix): Double = {
+    // trace d'un bloc
     def tr(bm: Matrix): Double = {
-      val n = if (bm.numCols < bm.numRows) bm.numCols else bm.numRows
-      val elements = for {
-        i <- (0 until n)
-        e = bm.apply(i, i)
-      } yield e
-      elements.reduce((a, b) => a + b)
+      val n = bm.numCols.min(bm.numRows)
+      (0 until n).map(i => bm(i, i)).reduce(_ + _)
     }
+    // somme des traces des blocs
     m.blocks.map(b => b match {
       case ((i, j), bm) => if (i == j) tr(bm) else 0
-    })
+    }).first()
+  }
+
+  /**
+   * Créer la matrice B à partir de la matrice A.
+   * 
+   * @param cooMatrix la matrice A
+   * @param blockSize la taille des blocs
+   * @return          la matrice B
+   */
+  def createBFromA(cooMatrix: CoordinateMatrix, blockSize: Int): BlockMatrix = {
+    val sc = cooMatrix.entries.sparkContext
+
+    val A = cooMatrix.toBlockMatrix(blockSize, blockSize)
+
+    val numCols = A.numCols().toInt
+    val numRows = A.numRows().toInt
+
+    val col_sums = ModularityWithBlockMatrix.colSums(cooMatrix)
+
+    val N = col_sums.sum
+
+    val minus_row_sums_over_N = ModularityWithBlockMatrix
+      .rowSums(cooMatrix, -1 / N)
+
+    val col_sums_v = ModularityWithBlockMatrix
+      .createBlockMatrixFromArray(sc, col_sums, 'h, blockSize)
+
+    val minus_row_sums_over_N_v = ModularityWithBlockMatrix
+      .createBlockMatrixFromArray(sc, minus_row_sums_over_N, 'v, blockSize)
+
+    val indep = minus_row_sums_over_N_v.multiply(col_sums_v)
+    indep.add(A)
   }
 }
 
