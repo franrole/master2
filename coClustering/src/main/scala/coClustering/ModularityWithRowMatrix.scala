@@ -1,5 +1,7 @@
 package coClustering
 
+import com.typesafe.config.ConfigFactory
+import org.apache.spark.mllib.clustering.KMeans
 import org.apache.spark.SparkContext
 import org.apache.spark.mllib.linalg.{
   Vector,
@@ -11,10 +13,12 @@ import org.apache.spark.mllib.linalg.{
 import org.apache.spark.mllib.linalg.distributed.{
   MatrixEntry,
   CoordinateMatrix,
-  BlockMatrix
+  BlockMatrix,
+  IndexedRowMatrix,
+  DistributedMatrix
 }
 import org.apache.spark.rdd.RDD
-import org.apache.spark.mllib.linalg.distributed.IndexedRowMatrix
+import org.apache.spark.mllib.linalg.DenseMatrix
 
 class ModularityWithRowMatrix(
   var k: Int,
@@ -30,28 +34,54 @@ class ModularityWithRowMatrix(
   def run(cooMatrix: CoordinateMatrix): coClusteringModel = {
 
     // l'initialisation se fait par matrices par blocs
-    val B_block = ModularityWithBlockMatrix.createBFromA(cooMatrix, blockSize)
-    B_block.blocks.cache()
 
-    val B = B_block.toIndexedRowMatrix()
-    B.rows.cache()
+    val B_block_or_coo = ModularityWithRowMatrix.createBFromA(cooMatrix, blockSize)
+    val a = B_block_or_coo match {
+      case m: CoordinateMatrix => {
+        m.entries.cache()
+        val B = m.toIndexedRowMatrix()
+        B.rows.cache()
+        val Bt = m.transpose.toIndexedRowMatrix()
+        Bt.rows.cache()
+        m.entries.unpersist()
+        (B, Bt)
+      }
+      case m: BlockMatrix => {
+        m.blocks.cache()
+        val B = m.toIndexedRowMatrix()
+        B.rows.cache()
+        val Bt = m.transpose.toIndexedRowMatrix()
+        Bt.rows.cache()
+        m.blocks.unpersist()
+        (B, Bt)
+      }
+    }
+    val B = a._1
+    val Bt = a._2
+    //val B_block = ModularityWithBlockMatrix.createBFromA(cooMatrix, blockSize)
+    //    B_block.blocks.cache()
 
-    val Bt = B_block.transpose.toIndexedRowMatrix()
-    Bt.rows.cache()
+    //    val B = B_block_or_coo.toIndexedRowMatrix()
+    //    B.rows.cache()
 
-    B_block.blocks.unpersist()
+//    val Bt = B_block.transpose.toIndexedRowMatrix()
+//    Bt.rows.cache()
+
+
 
     val sc = B.rows.sparkContext
     val numCols = B.numCols().toInt
     val numRows = B.numRows().toInt
 
-    var W = ModularityWithBlockMatrix
-      .createRandomW(sc, numCols, k, blockSize).toLocalMatrix()
+    var W = ModularityWithRowMatrix.initW(sc, numCols, k, blockSize, Bt)
 
     var Z: Matrix = null
     var iter = 0
 
-    while (iter <= maxIterations) {
+    var m_begin = Double.MinValue
+    var change = true
+    while (change & iter <= maxIterations) {
+      change = false
 
       var BW = B.multiply(W)
 
@@ -64,7 +94,29 @@ class ModularityWithRowMatrix(
         .create_Z_or_W(BtZ, numCols, k, blockSize)
 
       //TODO critère
+      val BW_local = BW.toBlockMatrix.toLocalMatrix match {
+        case m: DenseMatrix  => m
+        case m: SparseMatrix => m.toDense
+      }
+      val k_times_k = Z.transpose.multiply(BW_local)
+      var m_end = (0 until k).map(i => k_times_k(i, i)).reduce(_ + _)
 
+      val diff = (m_end - m_begin)
+      val diff_abs = if (diff < 0) -diff else diff
+      if (diff_abs > epsilon) {
+        println(diff_abs)
+        println("epsilon")
+        println(epsilon)
+        m_begin = m_end
+        change = true
+        println("change")
+      } else {
+        println("change: false")
+      }
+
+      println(iter)
+      println("Criterion: " + m_end)
+      println("hi")
       println(iter)
       iter = iter + 1
     }
@@ -92,7 +144,7 @@ object ModularityWithRowMatrix {
     val A_coo = ModularityWithBlockMatrix.cooMatrix(sc, cooMatrixFilePath,
       nRows, nCols)
 
-    new ModularityWithRowMatrix(k).run(A_coo)
+    new ModularityWithRowMatrix(k, maxIterations, blockSize, epsilon).run(A_coo)
   }
 
   /**
@@ -129,5 +181,60 @@ object ModularityWithRowMatrix {
     })
     var Z_coo = new CoordinateMatrix(entries, nRows, nCols)
     Z_coo.toBlockMatrix(blockSize, blockSize).toLocalMatrix()
+  }
+
+  def initW(sc: SparkContext, numCols: Int, k: Int, blockSize: Int, Bt: IndexedRowMatrix): Matrix = {
+
+    val config = ConfigFactory.load()
+    val useKmeans = try {
+      config.getBoolean("co-clustering.init.use-kmeans")
+    } catch {
+      case _: Throwable => false
+    }
+
+    if (useKmeans) {
+      println("useKmeans")
+      val kmeansMaxIterations = try {
+        config.getInt("co-clustering.init.kmeans-max-iterations")
+      } catch {
+        case _: Throwable => 30
+      }
+      val kmeansRuns = try {
+        config.getInt("co-clustering.init.kmeans-runs")
+      } catch {
+        case _: Throwable => 1
+      }
+
+      val rowVectors = Bt.rows.map {
+        row => row.vector
+      }.cache()
+      val clusters = KMeans.train(rowVectors, k, kmeansMaxIterations, kmeansRuns)
+      val labels = clusters.predict(rowVectors)
+      rowVectors.unpersist(false)
+      val entries = labels.zipWithIndex().map {
+        e => MatrixEntry(e._2, e._1, 1.0)
+      }
+      new CoordinateMatrix(entries, numCols, k).toBlockMatrix().toLocalMatrix()
+    } else {
+      println("useKmeans: no")
+      ModularityWithBlockMatrix
+        .createRandomW(sc, numCols, k, blockSize).toLocalMatrix()
+    }
+  }
+
+  def createBFromA(cooMatrix: CoordinateMatrix, blockSize: Int): DistributedMatrix = {
+    val A = cooMatrix
+    val config = ConfigFactory.load()
+    val computeIndependence = try {
+      config.getBoolean("co-clustering.init.compute-independence")
+    } catch {
+      case _: Throwable => false
+    }
+    if (!computeIndependence) {
+      println("compute independence: skip")
+      A
+    } else {
+      ModularityWithBlockMatrix.createBFromA(cooMatrix, blockSize)
+    }
   }
 }

@@ -1,18 +1,17 @@
  
 lazy val root = (project in file(".")).
   settings(
-    name := "coClustering",
+    name := "benchmark",
     version := "1.0",
     scalaVersion := "2.11.4",
-    mainClass in Compile := Some("coClustering.MainApplication")        
+    mainClass in Compile := Some("benchmark.MainApplication")        
   )
 
 libraryDependencies ++= Seq(
   "org.apache.spark" %% "spark-core" % "1.3.0" % "provided",
   "org.apache.spark" %% "spark-mllib" % "1.3.0" % "provided",
   "org.apache.spark" %% "spark-graphx" % "1.3.0" % "provided",
-  "org.scalatest" %% "scalatest" % "2.2.4" % "test",
-  "com.typesafe" % "config" % "0.3.1"
+  "org.scalatest" %% "scalatest" % "2.2.4" % "test"
 )
 
 // META-INF discarding

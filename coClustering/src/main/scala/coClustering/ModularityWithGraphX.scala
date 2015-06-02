@@ -34,24 +34,32 @@ class ModularityWithGraphX(
 
     graph = ModularityWithGraphX.updateLabels(graph, wordsLabels)
 
+    var docsLabels: VertexRDD[Int] = null
     var iter = 0
+    var prevG: Graph[Int, Double] = null
     while (iter <= maxIterations) {
       //BW
-      var docsFuzzyLabels = ModularityWithGraphX.fuzzyLabels(graph, k)
+      val docsFuzzyLabels = ModularityWithGraphX.fuzzyLabels(graph, k)
+      docsFuzzyLabels.cache()
 
       //Z
-      var docsLabels = ModularityWithGraphX.getLabels(docsFuzzyLabels)
+      docsLabels = ModularityWithGraphX.getLabels(docsFuzzyLabels)
+      docsLabels.cache()
 
+      prevG = graph
       graph = ModularityWithGraphX.updateLabels(graph, docsLabels)
 
       //arcs des documents vers les mots
       graph = graph.reverse
+      graph.cache()
 
       //BtZ
-      var wordsFuzzyLabels = ModularityWithGraphX.fuzzyLabels(graph, k)
+      val wordsFuzzyLabels = ModularityWithGraphX.fuzzyLabels(graph, k)
+      wordsFuzzyLabels.cache()
 
       //W
-      var wordsLabels = ModularityWithGraphX.getLabels(wordsFuzzyLabels)
+      wordsLabels = ModularityWithGraphX.getLabels(wordsFuzzyLabels)
+      wordsLabels.cache()
 
       graph = ModularityWithGraphX.updateLabels(graph, wordsLabels)
 
@@ -59,6 +67,14 @@ class ModularityWithGraphX(
       graph = graph.reverse
 
       println(iter)
+      ModularityWithGraphX.criterion(graph)
+      prevG.unpersistVertices(blocking=true)
+      prevG.edges.unpersist(blocking=true)
+      docsFuzzyLabels.unpersist(blocking=true)
+      wordsFuzzyLabels.unpersist(blocking=true)
+      docsLabels.unpersist(blocking=true)
+      wordsLabels.unpersist(blocking=true)      
+      
       iter = iter + 1
     }
 
@@ -153,18 +169,33 @@ object ModularityWithGraphX {
    */
   def fuzzyLabels(graph: Graph[Int, Double],
                   k: Int): VertexRDD[Array[Double]] = {
+    //on n'utilise pas la valeur du nœud de destination
+    val tripletFields = new TripletFields(true, false, true)
     graph.aggregateMessages[Array[Double]](
       triplet => { // Map Function
         //on envoie au nœud de destination un tableau représentant le nœud
         //source
-        triplet.sendToDst(Array.tabulate(k) {
-          //valeur de l'arc pour l'index correspondant au label du nœud source
-          //0 sinon
-          case (index) => if (index != triplet.srcAttr) 0 else triplet.attr
-        })
+        triplet.sendToDst(
+          //            Array.tabulate(k) {
+          //          //valeur de l'arc pour l'index correspondant au label du nœud source
+          //          //0 sinon
+          //          case (index) => if (index != triplet.srcAttr) 0 else triplet.attr
+          //        }
+          {
+            val a = Array.fill(k) { 0.0 }
+            a.update(triplet.srcAttr, triplet.attr)
+            a
+          })
       }, // Reduce Function
       //somme des deux tableaux suivant les classes
-      (array1, array2) => array1.zip(array2).map { case (x, y) => (x + y) })
+      (array1, array2) => {
+        for (i <- 0 until k) {
+          array2.update(i, array2(i) + array1(i))
+        }
+        array2
+      },
+      //array1.zip(array2).map { case (x, y) => (x + y) },
+      tripletFields)
   }
 
   /**
@@ -180,4 +211,10 @@ object ModularityWithGraphX {
     })
   }
 
+  /**
+   * Calcul le critère d'arrêt.
+   */
+  def criterion(graph: Graph[Int, Double]): Double = {
+    graph.triplets.map(e => if (e.srcAttr != e.dstAttr) e.attr else 0).sum
+  }
 }
