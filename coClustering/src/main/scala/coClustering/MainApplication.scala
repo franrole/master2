@@ -1,5 +1,6 @@
 package coClustering
 
+import com.typesafe.config.ConfigFactory
 import org.apache.spark.SparkContext
 import org.apache.spark.SparkConf
 import org.apache.spark.SparkContext._
@@ -18,29 +19,78 @@ import org.apache.spark.mllib.linalg.distributed.{
 import org.apache.spark.rdd.RDD
 
 object MainApplication {
-//  val path = "/home/stan/new/Stage/data/csv/"
-    val path = "/data"
+  val path = "/data"
 
   def main(args: Array[String]) {
     val spConfig = (new SparkConf).setAppName("CoClustering")
     val sc = new SparkContext(spConfig)
+    val config = ConfigFactory.load()
 
     val corpus = "ng20"
 
-    val (cooMatrixFilePath, nRows, nCols, k, predicted_labels_path) =
-      getParamsForCorpus(corpus)
+    val cooMatrixFilePath = config.getString("co-clustering.data.input-matrix-path")
+    val nRows = config.getInt("co-clustering.data.n-rows")
+    val nCols = config.getInt("co-clustering.data.n-cols")
+    val k = config.getInt("co-clustering.data.k")
+    val maxIterations = config.getInt("co-clustering.algorithm.max-iterations")
+    val epsilon = config.getDouble("co-clustering.algorithm.epsilon")
+    //    val epsilon = 1e-9
+    val predicted_labels_path = config.getString("co-clustering.results-path")
+    val resultsPath = predicted_labels_path
 
-    //    val coClusteringModel = ModularityWithBlockMatrix
-    //      .train(sc, cooMatrixFilePath, nRows, nCols, k)
-    //    coClusteringModel.rowLabels.saveAsTextFile(predicted_labels_path)
+    //    val (cooMatrixFilePath, nRows, nCols, k, predicted_labels_path) =
+    //      getParamsForCorpus(corpus)
 
-    val coClusteringModel = ModularityWithRowMatrix
-      .train(sc, cooMatrixFilePath, nRows, nCols, k, 20, 1024, -1.0)
-    coClusteringModel.rowLabels.saveAsTextFile(predicted_labels_path)
-    
-//    val coClusteringModel = ModularityWithGraphX.train(sc, cooMatrixFilePath, nRows, nCols, k, 30, 1024, -1.0)
-//    coClusteringModel.rowLabels.saveAsTextFile(predicted_labels_path)
-    
+    val algorithm = try {
+      config.getString("co-clustering.algorithm.name")
+    } catch {
+      case _: Throwable => "modularity"
+    }
+
+    algorithm match {
+      case "compute-independence" => {
+        println("algorithm: compute independence")
+        val cooMatrix = ModularityWithBlockMatrix.cooMatrix(sc, cooMatrixFilePath, nRows, nCols)
+        ModularityWithBlockMatrix.createBFromA(cooMatrix, 1024).toCoordinateMatrix().entries.map {
+          e => s"${e.i},${e.j},${e.value}"
+        }.coalesce(1).saveAsTextFile(resultsPath)
+      }
+
+      case "modularity" => {
+        println("Modularity")
+        val method = try {
+          config.getString("co-clustering.algorithm.method")
+        } catch {
+          case _: Throwable => "graphx"
+        }
+
+        method match {
+          case "rowMatrix" => {
+            println("ROw Matrix")
+            val coClusteringModel = ModularityWithRowMatrix
+              .train(sc, cooMatrixFilePath, nRows, nCols, k, maxIterations, 1024, epsilon)
+            coClusteringModel.rowLabels.saveAsTextFile(predicted_labels_path)
+          }
+
+          case "blockMatrix" => {
+            println("block Matrix")
+            val coClusteringModel = ModularityWithBlockMatrix
+              .train(sc, cooMatrixFilePath, nRows, nCols, k)
+            coClusteringModel.rowLabels.saveAsTextFile(predicted_labels_path)
+          }
+
+          case "graphx" => {
+            println("graphxMatrix")
+            val coClusteringModel = ModularityWithGraphX.train(sc, cooMatrixFilePath, nRows, nCols, k, 30, 1024, -1.0)
+            coClusteringModel.rowLabels.saveAsTextFile(predicted_labels_path)
+          }
+
+          case _ => println("Unknown method: " + method)
+        }
+      }
+
+      case _ => println("Unknown algorithm: " + algorithm)
+    }
 
     //    val a = ModularityWithBlockMatrix.cooMatrix(sc, cooMatrixFilePath, nRows, nCols)
     //    val b = a.toRowMatrix()

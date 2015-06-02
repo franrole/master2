@@ -14,15 +14,21 @@ import org.apache.spark.mllib.linalg.distributed.{
   BlockMatrix
 }
 import org.apache.spark.rdd.RDD
+import com.typesafe.config.ConfigFactory
 
 class ModularityWithBlockMatrix(
-  var k: Int,
-  maxIterations: Int = 30,
+  var k: Int = 0,
+  var maxIterations: Int = 30,
   blockSize: Int = 1024,
   epsilon: Double = 1e-9) {
 
   def setK(k: Int): this.type = {
     this.k = k
+    this
+  }
+
+  def setMaxIterations(maxIterations: Int): this.type = {
+    this.maxIterations = maxIterations
     this
   }
 
@@ -32,7 +38,7 @@ class ModularityWithBlockMatrix(
 
     val numCols = B.numCols().toInt
     val numRows = B.numRows().toInt
-    
+
     val sc = B.blocks.sparkContext
 
     var W = ModularityWithBlockMatrix
@@ -272,34 +278,49 @@ object ModularityWithBlockMatrix {
 
   /**
    * Créer la matrice B à partir de la matrice A.
-   * 
+   *
    * @param cooMatrix la matrice A
    * @param blockSize la taille des blocs
    * @return          la matrice B
    */
   def createBFromA(cooMatrix: CoordinateMatrix, blockSize: Int): BlockMatrix = {
-    val sc = cooMatrix.entries.sparkContext
 
     val A = cooMatrix.toBlockMatrix(blockSize, blockSize)
 
-    val numCols = A.numCols().toInt
-    val numRows = A.numRows().toInt
+    val config = ConfigFactory.load()
+    val computeIndependence = try {
+      config.getBoolean("co-clustering.init.compute-independence")
+    } catch {
+      case _: Throwable => false
+    }
+    if (!computeIndependence) {
+      println("compute independence: skip")
+      A
+    } else {
 
-    val col_sums = ModularityWithBlockMatrix.colSums(cooMatrix)
+      println("compute independence")
+      
+      val sc = cooMatrix.entries.sparkContext
 
-    val N = col_sums.sum
+      val numCols = A.numCols().toInt
+      val numRows = A.numRows().toInt
 
-    val minus_row_sums_over_N = ModularityWithBlockMatrix
-      .rowSums(cooMatrix, -1 / N)
+      val col_sums = ModularityWithBlockMatrix.colSums(cooMatrix)
 
-    val col_sums_v = ModularityWithBlockMatrix
-      .createBlockMatrixFromArray(sc, col_sums, 'h, blockSize)
+      val N = col_sums.sum
 
-    val minus_row_sums_over_N_v = ModularityWithBlockMatrix
-      .createBlockMatrixFromArray(sc, minus_row_sums_over_N, 'v, blockSize)
+      val minus_row_sums_over_N = ModularityWithBlockMatrix
+        .rowSums(cooMatrix, -1 / N)
 
-    val indep = minus_row_sums_over_N_v.multiply(col_sums_v)
-    indep.add(A)
+      val col_sums_v = ModularityWithBlockMatrix
+        .createBlockMatrixFromArray(sc, col_sums, 'h, blockSize)
+
+      val minus_row_sums_over_N_v = ModularityWithBlockMatrix
+        .createBlockMatrixFromArray(sc, minus_row_sums_over_N, 'v, blockSize)
+
+      val indep = minus_row_sums_over_N_v.multiply(col_sums_v)
+      indep.add(A)
+    }
   }
 }
 
